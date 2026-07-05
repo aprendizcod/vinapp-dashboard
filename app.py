@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
-import sqlite3
-import json
 import io
+import re
 
-# 1. CONFIGURACIÓN VISUAL Y ESTILO
-st.set_page_config(page_title="VinApp Intelligence Pro", layout="wide")
+# 1. ESTILO VISUAL ELITE (AZUL VINAPP)
+st.set_page_config(page_title="VinApp Global BI Pro", layout="wide")
 
 AZUL_VINAPP = "#0033a0"
 AZUL_CLARO = "#1e4fd1"
@@ -16,263 +16,198 @@ FONDO = "#f8fafc"
 VERDE_EXITO = "#10b981"
 ROJO_ALERTA = "#ef4444"
 
-# --- BLOQUE DE SEGURIDAD (PUERTA DE ENTRADA) ---
-def check_password():
-    """Retorna True si el usuario introdujo la contraseña correcta."""
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
+# --- BLOQUE DE SEGURIDAD (JEFES) ---
+if "auth" not in st.session_state: st.session_state.auth = False
 
-    if not st.session_state["authenticated"]:
-        st.markdown(f"""
-            <div style='text-align: center; padding: 50px;'>
-                <h1 style='color: {AZUL_VINAPP};'>VinApp Global BI</h1>
-                <p style='color: #64748b;'>Sistema de Inteligencia de Negocios Privado</p>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        col1, col2, col3 = st.columns([1,2,1])
-        with col2:
-            password_entrada = st.text_input("Introduce la Clave de Acceso Institucional:", type="password")
-            if st.button("Acceder al Dashboard"):
-                if password_entrada == "vinapp_elena":  # <--- ESTA ES LA CLAVE PARA TUS JEFES
-                    st.session_state["authenticated"] = True
-                    st.rerun()
-                else:
-                    st.error("⚠️ Clave incorrecta. Acceso denegado.")
-        return False
-    return True
-
-# Si no pasa el login, se detiene el código aquí
-if not check_password():
+if not st.session_state.auth:
+    st.markdown(f"<div style='text-align:center;padding:50px;'><h1 style='color:{AZUL_VINAPP};'>VinApp Global BI</h1></div>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        pin = st.text_input("Clave de Acceso Institucional:", type="password")
+        if st.button("Entrar"):
+            if pin.strip() == "vinapp_elena":
+                st.session_state.auth = True
+                st.rerun()
+            else: st.error("Clave incorrecta")
     st.stop()
 
-# --- SI LLEGÓ AQUÍ, ESTÁ AUTENTICADO ---
+# --- CONEXIÓN A GOOGLE SHEETS ---
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception:
+    st.error("Error de conexión. Verifica el archivo secrets.toml o los Secrets en Streamlit Cloud.")
+    st.stop()
 
+def load_data():
+    try:
+        # Lee la pestaña VENTAS. ttl=0 para que siempre traiga lo último
+        df = conn.read(spreadsheet=st.secrets["gsheet_url"], worksheet="VENTAS", ttl=0)
+        return df.dropna(subset=['MES_ID'])
+    except Exception:
+        return pd.DataFrame()
+
+# --- CSS PARA TARJETAS ---
 st.markdown(f"""
     <style>
-    .main {{ background-color: {FONDO}; font-family: 'Inter', sans-serif; }}
-    .stMetric {{ background-color: white; padding: 24px; border-radius: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid {AZUL_VINAPP}; }}
+    .main {{ background-color: {FONDO}; }}
+    .stMetric {{ background-color: white; padding: 20px; border-radius: 15px; border-top: 5px solid {AZUL_VINAPP}; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
     .ganador {{ color: #f59e0b; font-weight: bold; }}
-    .card-resumen {{
-        background-color: white; padding: 20px; border-radius: 15px; border: 1px solid #e2e8f0; 
-        text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-    }}
-    .delta-up {{ color: {VERDE_EXITO}; font-weight: bold; font-size: 0.9rem; }}
-    .delta-down {{ color: {ROJO_ALERTA}; font-weight: bold; font-size: 0.9rem; }}
+    .card-resumen {{ background-color: white; padding: 20px; border-radius: 15px; border: 1px solid #e2e8f0; text-align: center; }}
+    .delta-up {{ color: {VERDE_EXITO}; font-weight: bold; }}
+    .delta-down {{ color: {ROJO_ALERTA}; font-weight: bold; }}
     </style>
     """, unsafe_allow_html=True)
 
-# 2. GESTIÓN DE BASE DE DATOS
-def init_db():
-    conn = sqlite3.connect('vinapp_master_secure.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS ventas 
-                 (mes_id TEXT PRIMARY KEY, data_json TEXT, mapa_json TEXT, eficiencias TEXT)''')
-    conn.commit()
-    return conn
-
-def save_to_db(mes_id, df, mapa, eficiencias):
-    conn = init_db()
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO ventas VALUES (?, ?, ?, ?)", 
-              (mes_id, df.to_json(), json.dumps(mapa), json.dumps(eficiencias)))
-    conn.commit()
-    conn.close()
-
-def load_all_from_db():
-    conn = init_db()
-    try: return pd.read_sql_query("SELECT * FROM ventas", conn)
-    except: return pd.DataFrame()
-    finally: conn.close()
-
-# 3. PROCESAMIENTO QUIRÚRGICO (FIX ABRIL)
+# --- PROCESADOR DE HTML ---
 def clean_currency(value):
     if pd.isna(value): return 0.0
-    clean = str(value).replace('$', '').replace('.', '').replace(',', '.').strip()
+    clean = re.sub(r'[^\d]', '', str(value))
     try: return float(clean)
     except: return 0.0
 
-def process_file(file):
+def process_html(file):
     tablas = pd.read_html(file)
     df = max(tablas, key=len)
-    for i in range(min(15, len(df))):
+    for i in range(min(20, len(df))):
         fila = [str(x).upper() for x in df.iloc[i].values]
-        if 'VALOR' in fila or 'RESTAURANTE' in fila or 'PLAN' in fila or 'FECHA' in fila:
-            df.columns = df.iloc[i]
-            df = df[i+1:].reset_index(drop=True)
-            break
-    cols = [str(c).strip().upper() for c in df.columns]
-    final_cols = []
-    counts = {}
-    for col in cols:
-        if col in counts:
-            counts[col] += 1
-            final_cols.append(f"{col}_{counts[col]}")
-        else:
-            counts[col] = 0; final_cols.append(col)
-    df.columns = final_cols
+        if 'VALOR' in fila or 'PLAN' in fila or 'RESTAURANTE' in fila:
+            df.columns = df.iloc[i]; df = df[i+1:].reset_index(drop=True); break
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    f_col = lambda ks: next((c for c in df.columns if any(k in c for k in ks)), None)
+    
+    c_v = f_col(['VALOR', 'TOTAL'])
+    c_f = f_col(['FECHA', 'DIA'])
+    c_vend = f_col(['VENDEDOR'])
+    c_p = f_col(['PLAN'])
+    c_fue = f_col(['FUENTE'])
+    c_c = f_col(['CIUDAD'])
+    c_r = f_col(['RESTAURANTE', 'CLIENTE'])
+    c_fr = f_col(['PAGO', 'FRECUENCIA'])
 
-    m = {
-        'v': next((col for col in df.columns if 'VALOR' in col), None),
-        'f': next((col for col in df.columns if 'FECHA' in col), None),
-        'vend': next((col for col in df.columns if 'VENDEDOR' in col and 'UPGRADE' not in col), None),
-        'plan': next((col for col in df.columns if 'PLAN' in col and 'UPGRADE' not in col), None),
-        'fuente': next((col for col in df.columns if 'FUENTE' in col), None),
-        'ciudad': next((col for col in df.columns if 'CIUDAD' in col), None),
-        'freq': next((col for col in df.columns if any(x in col for x in ['FRECUENCIA', 'PAGO', 'RECURRENCIA'])), None),
-        'rest': next((col for col in df.columns if any(x in col for x in ['RESTAURANTE', 'CLIENTE', 'NOMBRE'])), None)
-    }
-    df[m['v']] = df[m['v']].apply(clean_currency)
-    df[m['f']] = pd.to_datetime(df[m['f']], dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[m['f'], m['rest']], how='all')
-    df = df[df[m['f']].notna()]
-    df = df[df[m['v']] > 0]
-    return df, m
+    df[c_v] = df[c_v].apply(clean_currency)
+    df[c_f] = pd.to_datetime(df[c_f], dayfirst=True, errors='coerce')
+    df = df.dropna(subset=[c_f]).query(f"{c_v} > 0")
 
-# --- CARGA DE DATOS ---
-historico = load_all_from_db()
-meses_db = {}
-if not historico.empty:
-    for _, row in historico.iterrows():
-        df_mes = pd.read_json(io.StringIO(row['data_json']))
-        mapa_mes = json.loads(row['mapa_json'])
-        df_mes[mapa_mes['f']] = pd.to_datetime(df_mes[mapa_mes['f']], unit='ms')
-        meses_db[row['mes_id']] = {"df": df_mes, "mapa": mapa_mes, "ef": json.loads(row['eficiencias'])}
+    return pd.DataFrame({
+        'FECHA': df[c_f].astype(str), 'RESTAURANTE': df[c_r], 'VALOR': df[c_v],
+        'VENDEDOR': df[c_vend], 'PLAN': df[c_p], 'FUENTE': df[c_fue],
+        'CIUDAD': df[c_c], 'FRECUENCIA': df[c_fr]
+    })
 
-# --- SIDEBAR ADMIN ---
+# --- PANEL ADMIN (SIDEBAR) ---
 with st.sidebar:
-    st.title("Panel Elena (Admin)")
-    pwd = st.text_input("Contraseña de Edición", type="password")
+    st.title("Admin Panel")
+    pwd = st.text_input("Clave Edición:", type="password")
     if pwd == "vinapp2026":
-        st.subheader("Cargar Nuevo Mes")
-        f_subida = st.file_uploader("Subir HTML", type="html")
-        if f_subida:
-            df_n, mapa_n = process_file(f_subida)
-            mes_n = df_n[mapa_n['f']].min().strftime('%B %Y')
-            st.info(f"Configurando: {mes_n}")
-            l = st.number_input("Contactos (Leads)", value=200, key="l_n")
-            d = st.number_input("Demos Agendadas", value=50, key="d_n")
-            a = st.number_input("Asistió", value=20, key="a_n")
-            c_v = st.number_input("Ventas Cerradas", value=len(df_n), key="c_n")
-            if st.button("Guardar Datos Permanentemente"):
-                save_to_db(mes_n, df_n, mapa_n, {'leads': l, 'demos': d, 'asist': a, 'comp': c_v})
-                st.success("¡Datos guardados!")
-                st.rerun()
-    st.divider()
-    if st.button("Cerrar Sesión"):
-        st.session_state["authenticated"] = False
-        st.rerun()
+        with st.expander("Subir Nuevo HTML", expanded=True):
+            f_in = st.file_uploader("Archivo HTML", type="html")
+            if f_in:
+                df_n = process_html(f_in)
+                m_id = pd.to_datetime(df_n['FECHA']).min().strftime('%B %Y')
+                st.info(f"Detectado: {m_id}")
+                st.markdown("### Datos del Embudo")
+                c_1 = st.number_input("Contactos", value=200)
+                c_2 = st.number_input("Agendó Demo", value=50)
+                c_3 = st.number_input("Asistió", value=20)
+                c_4 = st.number_input("Compró", value=len(df_n)) # SE AGREGÓ COMPRÓ
+                
+                if st.button("Guardar en Google Sheets"):
+                    df_n['MES_ID'], df_n['CONTACTOS'], df_n['AGENDO'], df_n['ASISTIO'], df_n['COMPRO'] = m_id, c_1, c_2, c_3, c_4
+                    master = load_data()
+                    if not master.empty: master = master[master['MES_ID'] != m_id]
+                    final = pd.concat([master, df_n], ignore_index=True)
+                    conn.update(spreadsheet=st.secrets["gsheet_url"], worksheet="VENTAS", data=final)
+                    st.success("¡Datos guardados!"); st.rerun()
 
 # --- DASHBOARD ---
-if meses_db:
-    ordenados = sorted(meses_db.keys(), key=lambda x: datetime.strptime(x, '%B %Y'))
-    tabs = st.tabs([f"📊 {m}" for m in ordenados])
+df_master = load_data()
+if not df_master.empty:
+    df_master['FECHA'] = pd.to_datetime(df_master['FECHA'])
+    meses_ord = sorted(df_master['MES_ID'].unique(), key=lambda x: datetime.strptime(x, '%B %Y'))
+    tabs = st.tabs([f"📊 {m}" for m in meses_ord])
 
-    for i, mes_key in enumerate(ordenados):
+    for i, m_sel in enumerate(meses_ord):
         with tabs[i]:
-            data = meses_db[mes_key]; df = data["df"]; c = data["mapa"]; ef = data["ef"]
-            prev = meses_db[ordenados[i-1]] if i > 0 else None
-            ventas_act = df[c['v']].sum(); lic_act = len(df); t_prom_act = ventas_act/lic_act if lic_act>0 else 0
+            df = df_master[df_master['MES_ID'] == m_sel]
+            df_prev = df_master[df_master['MES_ID'] == meses_ord[i-1]] if i > 0 else None
             
-            st.title(f"Reporte Mensual {mes_key}")
+            v_act, l_act = df['VALOR'].sum(), len(df)
+            t_act = v_act/l_act if l_act>0 else 0
 
-            # 1. KPIs
+            st.header(f"Dashboard Comercial - {m_sel}")
             k1, k2, k3 = st.columns(3)
-            if prev:
-                v_ant = prev["df"][prev["mapa"]['v']].sum()
-                k1.metric("VENTAS TOTALES", f"$ {ventas_act:,.0f}", f"{((ventas_act-v_ant)/v_ant)*100:+.1f}% vs ant.")
-            else: k1.metric("VENTAS TOTALES", f"$ {ventas_act:,.0f}")
-            k2.metric("LICENCIAS NUEVAS", lic_act)
-            k3.metric("TICKET PROMEDIO", f"$ {t_prom_act:,.0f}")
+            k1.metric("VENTAS TOTALES", f"$ {v_act:,.0f}")
+            k2.metric("LICENCIAS NUEVAS", l_act)
+            k3.metric("TICKET PROMEDIO", f"$ {t_act:,.0f}")
 
-            # 2. EMBUDO
+            # 1. EMBUDO (CON COMPRÓ)
             st.divider()
-            f1, f2 = st.columns([2, 1])
-            with f1:
-                st.subheader("🌪️ Embudo de Ventas")
-                fig_f = go.Figure(go.Funnel(
-                    y = ["Contactos", "Demos", "Asistió", "Compró"],
-                    x = [ef['leads'], ef['demos'], ef['asist'], ef['comp']],
-                    textinfo = "value+percent initial",
-                    marker = {"color": [AZUL_VINAPP, AZUL_CLARO, "#4b7aed", VERDE_EXITO]}
-                ))
+            st.subheader("🌪️ Embudo Dinámico")
+            e1, e2 = st.columns([2,1])
+            with e1:
+                ef = {'co': df['CONTACTOS'].iloc[0], 'ag': df['AGENDO'].iloc[0], 'as': df['ASISTIO'].iloc[0], 'cp': df['COMPRO'].iloc[0]}
+                fig_f = go.Figure(go.Funnel(y=["Contactos", "Agendó", "Asistió", "Compró"], x=[ef['co'], ef['ag'], ef['as'], ef['cp']], marker={"color": [AZUL_VINAPP, AZUL_CLARO, "#4b7aed", VERDE_EXITO]}))
                 st.plotly_chart(fig_f, use_container_width=True)
-            with f2:
-                st.subheader("Métricas de Eficiencia")
-                t_asist = (ef['asist']/ef['demos']*100) if ef['demos']>0 else 0
-                t_conv = (ef['comp']/ef['asist']*100) if ef['asist']>0 else 0
-                st.metric("TASA ASISTENCIA", f"{t_asist:.1f}%")
-                st.metric("INASISTENCIA", f"{ef['demos']-ef['asist']} pros.", f"{(1-t_asist/100)*100:.1f}%", delta_color="inverse")
-                st.metric("TASA CIERRE", f"{t_conv:.1f}%")
+            with e2:
+                st.metric("TASA ASISTENCIA", f"{(ef['as']/ef['ag']*100):.1f}%" if ef['ag']>0 else "0%")
+                st.metric("INASISTENCIA", f"{int(ef['ag']-ef['as'])} pros.", delta_color="inverse")
+                st.metric("TASA CIERRE (COMPRÓ)", f"{(ef['cp']/ef['as']*100):.1f}%" if ef['as']>0 else "0%")
 
-            # 3. CANALES
+            # 2. PLANES Y VENDEDORES
             st.divider()
-            st.subheader("📈 Contribución por Canal (Fuente)")
-            f_df = df.groupby(c['fuente']).agg(Transacciones=(c['v'], 'count'), Ingresos=(c['v'], 'sum')).reset_index().sort_values('Ingresos', ascending=False)
-            f_df['% Total'] = (f_df['Ingresos']/ventas_act*100).map("{:.1f}%".format)
-            fa, fb = st.columns(2)
-            with fa: st.table(f_df.assign(Ingresos=f_df['Ingresos'].map("$ {:,.0f}".format)))
-            with fb: st.plotly_chart(px.bar(f_df, x=c['fuente'], y='Ingresos', color_discrete_sequence=[AZUL_VINAPP]), use_container_width=True)
-
-            # 4. PLANES Y VENDEDORES (ESTRELLAS 🌟)
-            st.divider()
-            st.subheader("📦 Detalle de Planes y Vendedores")
-            p_df = df.groupby(c['plan']).agg(Cantidad=(c['v'], 'count'), Aporte=(c['v'], 'sum')).reset_index().sort_values('Aporte', ascending=False)
-            p1, p2 = st.columns(2)
-            with p1: st.plotly_chart(px.bar(p_df, x=c['plan'], y='Cantidad', text_auto=True, color_discrete_sequence=[AZUL_CLARO]), use_container_width=True)
-            with p2:
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                st.markdown("### Ventas por Plan")
+                p_df = df.groupby('PLAN').agg(Cant=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
+                st.plotly_chart(px.bar(p_df, x='PLAN', y='Cant', text_auto=True, color_discrete_sequence=[AZUL_CLARO]), use_container_width=True)
+            with c_p2:
                 p_df['🌟'] = p_df['Aporte'].apply(lambda x: '🌟' if x == p_df['Aporte'].max() else '')
                 st.table(p_df.assign(Aporte=p_df['Aporte'].map("$ {:,.0f}".format)))
 
-            v_df = df.groupby(c['vend']).agg(Licencias=(c['v'], 'count'), Aporte=(c['v'], 'sum')).reset_index().sort_values('Aporte', ascending=False)
-            v1, v2 = st.columns(2)
-            with v1: st.plotly_chart(px.bar(v_df, x=c['vend'], y='Aporte', text_auto='.2s', color_discrete_sequence=[AZUL_VINAPP]), use_container_width=True)
-            with v2:
-                v_df['🌟'] = v_df['Licencias'].apply(lambda x: '🌟' if x == v_df['Licencias'].max() else '')
+            # Vendedores
+            st.divider()
+            c_v1, c_v2 = st.columns(2)
+            with c_v1:
+                st.markdown("### Desempeño Vendedores")
+                v_df = df.groupby('VENDEDOR').agg(Lic=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
+                st.plotly_chart(px.bar(v_df, x='VENDEDOR', y='Aporte', text_auto='.2s', color_discrete_sequence=[AZUL_VINAPP]), use_container_width=True)
+            with c_v2:
+                v_df['🌟'] = v_df['Lic'].apply(lambda x: '🌟' if x == v_df['Lic'].max() else '')
                 st.table(v_df.assign(Aporte=v_df['Aporte'].map("$ {:,.0f}".format)))
 
-            # 5. CIUDAD (TABLA DETALLADA)
-            st.divider()
+            # CIUDAD TABLA (TAL CUAL PEDISTE)
             st.subheader("📍 Desempeño por Ciudad")
-            city_df = df.groupby(c['ciudad']).agg(Ventas=(c['v'], 'count'), Aporte=(c['v'], 'sum')).reset_index().sort_values('Aporte', ascending=False)
-            city_df['🌟'] = city_df['Aporte'].apply(lambda x: '🌟' if x == city_df['Aporte'].max() else '')
-            st.table(city_df.assign(Aporte=city_df['Aporte'].map("$ {:,.0f}".format)))
+            ci_df = df.groupby('CIUDAD').agg(Ventas=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
+            ci_df['🌟'] = ci_df['Aporte'].apply(lambda x: '🌟' if x == ci_df['Aporte'].max() else '')
+            st.table(ci_df.assign(Aporte=ci_df['Aporte'].map("$ {:,.0f}".format)))
 
-            # 6. CRECIMIENTO VS ANTERIOR
-            if prev:
-                st.divider()
-                st.subheader("📊 Resumen de Crecimiento vs Mes Anterior")
+            # 3. RESUMEN CRECIMIENTO VS MES ANTERIOR
+            st.divider()
+            st.subheader("📊 Resumen de Crecimiento vs Mes Anterior")
+            if df_prev is not None:
                 cr1, cr2, cr3 = st.columns(3)
-                v_ant = prev["df"][prev["mapa"]['v']].sum(); l_ant = len(prev["df"]); t_ant = v_ant/l_ant if l_ant>0 else 0
-                def res(tit, act, ant, iso=True):
-                    d = ((act-ant)/ant)*100 if ant>0 else 0
+                v_ant, l_ant = df_prev['VALOR'].sum(), len(df_prev)
+                t_ant = v_ant/l_ant if l_ant>0 else 0
+                def metric_card(tit, act, ant, iso=True):
+                    d = ((act-ant)/ant*100) if ant>0 else 0
                     cl = "delta-up" if d>=0 else "delta-down"
                     val = f"$ {act:,.0f}" if iso else f"{act}"
                     return f"<div class='card-resumen'><p>{tit}</p><h3>{val}</h3><p class='{cl}'>{d:+.1f}%</p></div>"
-                cr1.markdown(res("Ventas", ventas_act, v_ant), unsafe_allow_html=True)
-                cr2.markdown(res("Licencias", lic_act, l_ant, False), unsafe_allow_html=True)
-                cr3.markdown(res("Ticket Prom.", t_prom_act, t_ant), unsafe_allow_html=True)
+                cr1.markdown(metric_card("Ventas", v_act, v_ant), unsafe_allow_html=True)
+                cr2.markdown(metric_card("Licencias", l_act, l_ant, False), unsafe_allow_html=True)
+                cr3.markdown(metric_card("Ticket Prom.", t_act, t_ant), unsafe_allow_html=True)
+            else: st.info("Sin mes anterior para comparar.")
 
-            # 7. EXPLORADOR
-            st.divider()
-            st.subheader("🔍 Explorador de Clientes")
-            c_sel = st.selectbox("Filtrar por:", ["Plan", "Fuente", "Vendedor"], key=f"cs_{i}")
-            map_f = {"Plan": c['plan'], "Fuente": c['fuente'], "Vendedor": c['vend']}
-            v_sel = st.selectbox(f"Seleccionar {c_sel}:", df[map_f[c_sel]].unique(), key=f"vs_{i}")
-            st.dataframe(df[df[map_f[c_sel]] == v_sel][[c['rest'], c['v'], c['f'], c['ciudad']]], use_container_width=True)
-
-    # 8. HISTÓRICO FINAL
+    # 4. EVOLUCIÓN HISTÓRICA FINAL
     st.divider()
     st.header("📈 Evolución Histórica: Ingresos vs Licencias")
-    h_data = pd.DataFrame([{"Mes": k, "Ingresos": v["df"][v["mapa"]['v']].sum(), "Licencias": len(v["df"])} for k, v in meses_db.items()])
+    h_data = df_master.groupby('MES_ID').agg({'VALOR':'sum', 'RESTAURANTE':'count'}).reset_index()
+    h_data['ORDEN'] = h_data['MES_ID'].apply(lambda x: datetime.strptime(x, '%B %Y'))
+    h_data = h_data.sort_values('ORDEN')
     fig_h = go.Figure()
-    fig_h.add_trace(go.Bar(x=h_data['Mes'], y=h_data['Ingresos'], name="Ingresos", marker_color=AZUL_VINAPP))
-    fig_h.add_trace(go.Scatter(x=h_data['Mes'], y=h_data['Licencias'], name="Licencias", yaxis="y2", line=dict(color=VERDE_EXITO, width=4)))
-    fig_h.update_layout(
-        yaxis=dict(title=dict(text="Ingresos ($)", font=dict(color=AZUL_VINAPP)), tickfont=dict(color=AZUL_VINAPP)),
-        yaxis2=dict(title=dict(text="Licencias (und)", font=dict(color=VERDE_EXITO)), tickfont=dict(color=VERDE_EXITO), overlaying='y', side='right'),
-        template="plotly_white", legend=dict(orientation="h", y=1.1)
-    )
+    fig_h.add_trace(go.Bar(x=h_data['MES_ID'], y=h_data['VALOR'], name="Ingresos", marker_color=AZUL_VINAPP))
+    fig_h.add_trace(go.Scatter(x=h_data['MES_ID'], y=h_data['RESTAURANTE'], name="Licencias", yaxis="y2", line=dict(color=VERDE_EXITO, width=4)))
+    fig_h.update_layout(yaxis=dict(title="Ingresos ($)"), yaxis2=dict(title="Licencias", overlaying='y', side='right'), template="plotly_white", legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig_h, use_container_width=True)
 
-else: st.warning("Esperando carga de datos de administrador.")
+else: st.warning("Sube un mes en el panel Administrador para activar el Dashboard.")
