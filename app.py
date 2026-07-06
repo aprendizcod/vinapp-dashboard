@@ -243,5 +243,4 @@ if not df_master.empty:
         elif tipo_g == "Torta": st.plotly_chart(px.pie(cust_df, names=col_x, values=y_label, hole=0.4))
         else: st.plotly_chart(px.line(cust_df, x=col_x, y=y_label, markers=True))
 
-else:
-    st.warning("👋 i love you)
+else: st.warning("Sube un mes en el panel Administrador para activar el Dashboard.")
