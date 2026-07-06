@@ -8,7 +8,7 @@ import io
 import re
 
 # 1. CONFIGURACIÓN VISUAL ELITE
-st.set_page_config(page_title="VinApp Intelligence Pro v17", layout="wide")
+st.set_page_config(page_title="VinApp Intelligence Pro v18", layout="wide")
 
 AZUL_VINAPP = "#0033a0"
 AZUL_CLARO = "#1e4fd1"
@@ -16,10 +16,10 @@ FONDO = "#f8fafc"
 VERDE_EXITO = "#10b981"
 ROJO_ALERTA = "#ef4444"
 
-# --- SEGURIDAD ---
+# --- BLOQUE DE SEGURIDAD ---
 if "auth" not in st.session_state: st.session_state.auth = False
 if not st.session_state.auth:
-    st.markdown(f"<h1 style='text-align:center;color:{AZUL_VINAPP};'>VinApp Global BI</h1>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center;padding:50px;'><h1 style='color:{AZUL_VINAPP};'>VinApp Global BI</h1></div>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
         pin = st.text_input("Clave de Acceso Institucional:", type="password")
@@ -39,7 +39,7 @@ def load_data():
         return df.dropna(subset=['MES_ID'])
     except: return pd.DataFrame()
 
-# --- PROCESADOR HTML MEJORADO ---
+# --- PROCESADOR HTML (LIMPIEZA DE TOTALES) ---
 def clean_currency(value):
     if pd.isna(value): return 0.0
     clean = re.sub(r'[^\d]', '', str(value))
@@ -50,14 +50,12 @@ def process_html(file):
     tablas = pd.read_html(file)
     df = max(tablas, key=len)
     
-    # Detección de cabecera real
-    header_found = False
+    # Buscar encabezados reales
     for i in range(min(20, len(df))):
         fila = [str(x).upper() for x in df.iloc[i].values]
         if 'VALOR' in fila or 'PLAN' in fila or 'RESTAURANTE' in fila:
             df.columns = df.iloc[i]
             df = df[i+1:].reset_index(drop=True)
-            header_found = True
             break
     
     df.columns = [str(c).strip().upper() for c in df.columns]
@@ -67,10 +65,15 @@ def process_html(file):
     cp, cfue, cc = f_c(['PLAN']), f_c(['FUENTE']), f_c(['CIUDAD'])
     cr, cfr = f_c(['RESTAURANTE', 'CLIENTE']), f_c(['PAGO', 'FRECUENCIA'])
 
-    # Limpieza de filas de "TOTAL" para evitar duplicados en Mayo
+    # --- FILTRO ANTIDUPLICADOS (TOTALES) ---
+    # Convertimos valor a número primero
     df[cv] = df[cv].apply(clean_currency)
-    df = df[~df[cr].astype(str).str.contains("TOTAL|SUMA|RECUENTO|VALOR", case=False, na=False)]
-    df = df[df[cv] > 0]
+    
+    # ELIMINAMOS cualquier fila que parezca un resumen o total
+    # Si el restaurante está vacío, o dice "TOTAL", "SUMA", o si el valor es igual a la suma de la columna (duplicado)
+    df = df[df[cr].notna()] # Elimina filas donde el nombre del restaurante es vacío
+    df = df[~df[cr].astype(str).str.contains("TOTAL|SUMA|RECUENTO|VALOR|RESULTADO", case=False, na=False)]
+    df = df[df[cv] > 0] # Solo filas con valor positivo (transacciones reales)
     
     # Intento de parsear fecha
     df[cf] = pd.to_datetime(df[cf], dayfirst=True, errors='coerce')
@@ -86,27 +89,24 @@ with st.sidebar:
             if f:
                 df_raw, c_map = process_html(f)
                 
-                # --- SOLUCIÓN AL ERROR DE NAT ---
-                # Intentamos detectar el mes, si no, lo pedimos manual
+                # Detección de mes
                 valid_dates = df_raw[c_map['f']].dropna()
                 if not valid_dates.empty:
-                    mes_detectado = valid_dates.min().strftime('%B %Y')
-                    st.success(f"Mes detectado: {mes_detectado}")
-                    m_id = mes_detectado
+                    m_id = valid_dates.min().strftime('%B %Y')
+                    st.success(f"Mes detectado: {m_id}")
                 else:
-                    st.warning("No pude detectar la fecha automáticamente.")
-                    mes_nombre = st.selectbox("Selecciona el Mes:", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
-                    anio_nombre = st.selectbox("Selecciona el Año:", ["2026", "2027"])
-                    m_id = f"{mes_nombre} {anio_nombre}"
+                    st.warning("No se detectó fecha automática.")
+                    mes_n = st.selectbox("Mes:", ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"])
+                    anio_n = st.selectbox("Año:", ["2026", "2027"])
+                    m_id = f"{mes_n} {anio_n}"
 
                 st.markdown("### Datos del Embudo")
                 co = st.number_input("1. Contactos", 0, 10000, 200)
                 ag = st.number_input("2. Agendó Demo", 0, 10000, 50)
                 asi = st.number_input("3. Asistió", 0, 10000, 20)
-                com = st.number_input("4. Compró", 0, 10000, len(df_raw)) # LIBRE
+                com = st.number_input("4. Compró", 0, 10000, len(df_raw))
 
                 if st.button("Guardar en Google Sheets"):
-                    # Preparar dataframe final para subir
                     df_to_save = pd.DataFrame({
                         'MES_ID': m_id,
                         'FECHA': df_raw[c_map['f']].astype(str),
@@ -119,19 +119,24 @@ with st.sidebar:
                         'FRECUENCIA': df_raw[c_map['freq']],
                         'CONTACTOS': co, 'AGENDO': ag, 'ASISTIO': asi, 'COMPRO': com
                     })
-                    
                     master = load_data()
                     if not master.empty: master = master[master['MES_ID'] != m_id]
                     final = pd.concat([master, df_to_save], ignore_index=True)
                     conn.update(spreadsheet=st.secrets["gsheet_url"], worksheet="VENTAS", data=final)
-                    st.success(f"¡{m_id} guardado con éxito!"); st.rerun()
+                    st.success("¡Información Sincronizada!"); st.rerun()
 
 # --- CUERPO DASHBOARD ---
 master_db = load_data()
 
 if not master_db.empty:
+    # Estilos CSS para el Dashboard
+    st.markdown("""<style>
+    .stMetric { background-color: white; border-radius: 15px; border-top: 5px solid #0033a0; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    .card-resumen { background-color: white; padding: 20px; border-radius: 15px; border: 1px solid #e2e8f0; text-align: center; }
+    .ganador { color: #f59e0b; font-weight: bold; }
+    </style>""", unsafe_allow_html=True)
+
     master_db['FECHA'] = pd.to_datetime(master_db['FECHA'], errors='coerce')
-    # Ordenar meses por fecha real
     meses_lista = sorted(master_db['MES_ID'].unique(), key=lambda x: datetime.strptime(x, '%B %Y'))
     tabs = st.tabs([f"📊 {m}" for m in meses_lista])
 
@@ -139,11 +144,10 @@ if not master_db.empty:
         with tabs[i]:
             df = master_db[master_db['MES_ID'] == m_sel]
             df_p = master_db[master_db['MES_ID'] == meses_lista[i-1]] if i > 0 else None
-            
             v_act, l_act = df['VALOR'].sum(), len(df)
             t_act = v_act/l_act if l_act>0 else 0
             
-            st.title(f"Reporte {m_sel}")
+            st.title(f"Dashboard {m_sel}")
             
             # KPIs
             k1, k2, k3 = st.columns(3)
@@ -151,9 +155,9 @@ if not master_db.empty:
             k2.metric("LICENCIAS NUEVAS", l_act)
             k3.metric("TICKET PROMEDIO", f"$ {t_act:,.0f}")
 
-            # EMBUDO COMPLETO
+            # 1. EMBUDO COMPLETO
             st.divider()
-            st.subheader("🌪️ Embudo: Contactos - Agendó - Asistió - Compró")
+            st.subheader("🌪️ Análisis de Embudo")
             e1, e2 = st.columns([2,1])
             with e1:
                 ef = {'co': df['CONTACTOS'].iloc[0], 'ag': df['AGENDO'].iloc[0], 'as': df['ASISTIO'].iloc[0], 'cp': df['COMPRO'].iloc[0]}
@@ -169,34 +173,33 @@ if not master_db.empty:
                 st.metric("INA-SISTENCIA (%)", f"{ina_p:.1f}%", f"{int(ef['ag']-ef['as'])} personas", delta_color="inverse")
                 st.metric("TASA CIERRE (COMPRÓ)", f"{(ef['cp']/ef['as']*100):.1f}%")
 
-            # PLANES Y VENDEDORES
+            # 2. TABLAS Y GRÁFICAS (CON 🌟)
             st.divider()
-            st.subheader("📦 Análisis por Plan")
-            p_df = df.groupby('PLAN').agg(Cant=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
-            p_df['🌟'] = p_df['Aporte'].apply(lambda x: '🌟' if x == p_df['Aporte'].max() else '')
-            pc1, pc2 = st.columns(2)
-            with pc1: st.plotly_chart(px.bar(p_df, x='PLAN', y='Cant', text_auto=True, color_discrete_sequence=[AZUL_CLARO]), use_container_width=True)
-            with pc2: st.table(p_df.assign(Aporte=p_df['Aporte'].map("$ {:,.0f}".format)))
+            st.subheader("📦 Detalle por Plan y Vendedor")
+            col_p1, col_p2 = st.columns(2)
+            p_df = df.groupby('PLAN').agg(Cantidad=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
+            with col_p1: st.plotly_chart(px.bar(p_df, x='PLAN', y='Cantidad', text_auto=True, color_discrete_sequence=[AZUL_CLARO], title="Cantidad por Plan"), use_container_width=True)
+            with col_p2:
+                p_df['🌟'] = p_df['Aporte'].apply(lambda x: '🌟' if x == p_df['Aporte'].max() else '')
+                st.table(p_df.assign(Aporte=p_df['Aporte'].map("$ {:,.0f}".format)))
 
-            st.divider()
-            st.subheader("👤 Desempeño Vendedores")
+            col_v1, col_v2 = st.columns(2)
             v_df = df.groupby('VENDEDOR').agg(Licencias=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
-            v_df['🌟'] = v_df['Aporte'].apply(lambda x: '🌟' if x == v_df['Aporte'].max() else '')
-            vc1, vc2 = st.columns(2)
-            with vc1: st.plotly_chart(px.bar(v_df, x='VENDEDOR', y='Aporte', text_auto='.2s', color_discrete_sequence=[AZUL_VINAPP]), use_container_width=True)
-            with vc2: st.table(v_df.assign(Aporte=v_df['Aporte'].map("$ {:,.0f}".format)))
+            with col_v1: st.plotly_chart(px.bar(v_df, x='VENDEDOR', y='Aporte', text_auto='.2s', color_discrete_sequence=[AZUL_VINAPP], title="Aporte por Vendedor"), use_container_width=True)
+            with col_v2:
+                v_df['🌟'] = v_df['Licencias'].apply(lambda x: '🌟' if x == v_df['Licencias'].max() else '')
+                st.table(v_df.assign(Aporte=v_df['Aporte'].map("$ {:,.0f}".format)))
 
-            # CIUDAD
-            st.divider()
+            # 3. CIUDAD TABLA TÉCNICA
             st.subheader("📍 Desempeño por Ciudad")
             ci_df = df.groupby('CIUDAD').agg(Ventas=('VALOR','count'), Aporte=('VALOR','sum')).reset_index().sort_values('Aporte', ascending=False)
             ci_df['🌟'] = ci_df['Aporte'].apply(lambda x: '🌟' if x == ci_df['Aporte'].max() else '')
             st.table(ci_df.assign(Aporte=ci_df['Aporte'].map("$ {:,.0f}".format)))
 
-            # RESUMEN CRECIMIENTO
+            # 4. RESUMEN CRECIMIENTO
             if df_p is not None:
                 st.divider()
-                st.subheader("📊 Crecimiento vs Mes Anterior")
+                st.subheader("📊 Resumen de Crecimiento vs Mes Anterior")
                 cr1, cr2, cr3 = st.columns(3)
                 v_ant, l_ant = df_p['VALOR'].sum(), len(df_p)
                 t_ant = v_ant/l_ant if l_ant>0 else 0
@@ -205,25 +208,29 @@ if not master_db.empty:
                     color = "delta-up" if d>=0 else "delta-down"
                     val = f"$ {act:,.0f}" if iso else f"{act}"
                     return f"<div class='card-resumen'><p>{tit}</p><h3>{val}</h3><p class='{color}'>{d:+.1f}%</p></div>"
-                cr1.markdown(res_card("Ventas", v_act, v_ant), unsafe_allow_html=True)
-                cr2.markdown(res_card("Licencias", l_act, l_ant, False), unsafe_allow_html=True)
+                cr1.markdown(res_card("Crecimiento Ventas", v_act, v_ant), unsafe_allow_html=True)
+                cr2.markdown(res_card("Licencias Nuevas", l_act, l_ant, False), unsafe_allow_html=True)
                 cr3.markdown(res_card("Ticket Promedio", t_act, t_ant), unsafe_allow_html=True)
 
-            # CONSTRUCTOR DINÁMICO (FILTRADO POR MES)
-            with st.expander("🎨 Constructor de Gráficas de este mes"):
-                cx = st.selectbox(f"Categoría:", ["VENDEDOR", "PLAN", "FUENTE", "CIUDAD"], key=f"cx_{i}")
+            # 5. CONSTRUCTOR DIDÁCTICO (FILTRADO POR MES)
+            with st.expander("🎨 Constructor de Gráficas Manual"):
+                cx = st.selectbox(f"Categoría:", ["VENDEDOR", "PLAN", "FUENTE", "CIUDAD"], key=f"cxx_{i}")
                 st.plotly_chart(px.bar(df.groupby(cx)['VALOR'].sum().reset_index(), x=cx, y='VALOR', color=cx, text_auto='.2s'))
 
-    # HISTÓRICO FINAL
+    # 6. EVOLUCIÓN HISTÓRICA FINAL
     st.divider()
     st.header("📈 Evolución Histórica: Ingresos vs Licencias")
     h_data = master_db.groupby('MES_ID').agg({'VALOR':'sum', 'RESTAURANTE':'count'}).reset_index()
     h_data['ORDEN'] = h_data['MES_ID'].apply(lambda x: datetime.strptime(x, '%B %Y'))
     h_data = h_data.sort_values('ORDEN')
     fig_h = go.Figure()
-    fig_h.add_trace(go.Bar(x=h_data['MES_ID'], y=h_data['VALOR'], name="Ingresos", marker_color=AZUL_VINAPP))
-    fig_h.add_trace(go.Scatter(x=h_data['MES_ID'], y=h_data['RESTAURANTE'], name="Licencias", yaxis="y2", line=dict(color=VERDE_EXITO, width=4)))
-    fig_h.update_layout(yaxis=dict(title="Dinero ($)"), yaxis2=dict(title="Licencias", overlaying='y', side='right'), template="plotly_white", legend=dict(orientation="h", y=1.1))
+    fig_h.add_trace(go.Bar(x=h_data['MES_ID'], y=h_data['VALOR'], name="Ingresos ($)", marker_color=AZUL_VINAPP))
+    fig_h.add_trace(go.Scatter(x=h_data['MES_ID'], y=h_data['RESTAURANTE'], name="Licencias (und)", yaxis="y2", line=dict(color=VERDE_EXITO, width=4)))
+    fig_h.update_layout(
+        yaxis=dict(title=dict(text="Ingresos ($)", font=dict(color=AZUL_VINAPP)), tickfont=dict(color=AZUL_VINAPP)),
+        yaxis2=dict(title=dict(text="Licencias (und)", font=dict(color=VERDE_EXITO)), tickfont=dict(color=VERDE_EXITO), overlaying='y', side='right'),
+        template="plotly_white", legend=dict(orientation="h", y=1.1)
+    )
     st.plotly_chart(fig_h, use_container_width=True)
 
-else: st.warning("carga el primer mes en el panel Admin.")
+else: st.warning("Sube el primer reporte en el Admin")
